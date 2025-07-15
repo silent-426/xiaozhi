@@ -9,7 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
-
+#include <serial_driver.h>
 #include <cJSON.h>
 
 // 添加类型别名
@@ -29,7 +29,7 @@ private:
     bool has_default_value_;
     std::optional<int> min_value_;  // 新增：整数最小值
     std::optional<int> max_value_;  // 新增：整数最大值
-
+   
 public:
     // Required field constructor
     Property(const std::string& name, PropertyType type)
@@ -261,7 +261,7 @@ public:
     void AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
-
+    SerialDriver serial_driver_;
 private:
     McpServer();
     ~McpServer();

@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <esp_pthread.h>
-
+#include <serial_driver.h>
 #include "application.h"
 #include "display.h"
 #include "board.h"
@@ -17,8 +17,13 @@
 #define TAG "MCP"
 
 #define DEFAULT_TOOLCALL_STACK_SIZE 6144
-
-McpServer::McpServer() {
+#define BUF_SIZE 1024
+#define VCU_NUM UART_NUM_2
+#define VCU_RX 41
+#define VCU_TX 40
+#define VCU_Baud 115200
+McpServer::McpServer() : serial_driver_(VCU_NUM, VCU_RX, VCU_TX, VCU_Baud) {
+    
 }
 
 McpServer::~McpServer() {
@@ -102,6 +107,87 @@ void McpServer::AddCommonTools() {
                 return camera->Explain(question);
             });
     }
+
+        // 串口发送工具
+    AddTool("serial.send_data",
+        "通过串口发送固定格式数据帧（36字节）\n"
+        "格式: [0xAA][CMD][32字节数据][XOR校验][0x55]\n"
+        "参数:\n"
+        "  `data`: 自然语言指令（如：打开车灯/开启照明 → 统一转换为\"开灯\"）",
+        PropertyList({
+            Property("data", kPropertyTypeString)
+        }),
+        [this](const PropertyList& properties) -> ReturnValue {
+            try {
+                // 固定帧格式参数
+                const uint8_t FRAME_HEADER_1 = 0x5A;  //帧头
+                const uint8_t FRAME_HEADER_2 = 0xA5;  //帧头
+                const uint8_t FRAME_FOOTER = 0x55;  //帧尾
+                //const size_t FIXED_DATA_LENGTH = 6;    //有效数据长度
+                
+                std::string input = properties["data"].value<std::string>();
+                
+                // 语义统一
+                static const std::unordered_map<std::string, std::string> COMMAND_MAP = {
+                    {"开灯", "开灯"}, {"打开车灯", "开灯"}, {"开启照明", "开灯"},
+                    {"关灯", "关灯"}, {"关闭车灯", "关灯"}, {"熄灭灯光", "关灯"}
+                };
+    
+                // 语义匹配
+                std::string unified_cmd = input;
+                auto it = COMMAND_MAP.find(input);
+                if (it == COMMAND_MAP.end()) {
+                    // 模糊匹配
+                    if (input.find("开") != std::string::npos) {
+                        unified_cmd = "开灯";
+                    } else if (input.find("关") != std::string::npos || input.find("关") != std::string::npos) {
+                        unified_cmd = "关灯";
+                    }
+                } else {
+                    unified_cmd = it->second;
+                }
+    
+                // 记录转换日志
+                ESP_LOGI(TAG, "指令转换: %s → %s", input.c_str(), unified_cmd.c_str());
+    
+                // 根据统一指令构建数据帧
+                std::vector<uint8_t> cmd_data;
+                if (unified_cmd == "开灯") {
+                    cmd_data = {0x00, 0x01}; // 两字节 CMD 表示开灯
+                } else if (unified_cmd == "关灯") {
+                    cmd_data = {0x00, 0x02}; // 两字节 CMD 表示关灯
+                } else {
+                    // 将输入字符串转换为字节流
+                    cmd_data.assign(input.begin(), input.end());
+                }
+            
+                // 构建数据帧
+                std::vector<uint8_t> frame;
+                // 帧头为 0xA5 0x5A
+                frame.push_back(FRAME_HEADER_1);
+                frame.push_back(FRAME_HEADER_2);
+                // 添加两字节 CMD
+                frame.insert(frame.end(), cmd_data.begin(), cmd_data.end());
+                
+                // 计算校验（异或校验）
+                uint8_t checksum = 0;
+                for (size_t i = 2; i < frame.size(); ++i) { // 从帧头后开始计算校验
+                    checksum ^= frame[i];
+                }
+                frame.push_back(checksum);
+                
+                // 帧尾
+                frame.push_back(FRAME_FOOTER);
+            
+                // 转换为字符串，通过串口发送
+                std::string frame_str(frame.begin(), frame.end());
+                bool success = this->serial_driver_.sendData(frame_str);
+                
+                return success ? "{\"success\": true}" : "{\"success\": false}";
+            } catch (const std::exception& e) {
+                return "{\"success\": false, \"message\": \"" + std::string(e.what()) + "\"}";
+            }
+        });
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());
