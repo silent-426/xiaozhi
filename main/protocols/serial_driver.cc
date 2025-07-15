@@ -4,7 +4,8 @@
 #include <stdlib.h>
 #define TAG "SERIAL"
 #define BUF_SIZE 1024
-SerialDriver::SerialDriver(uart_port_t uart_num, int txd_pin, int rxd_pin, int baud_rate) : uart_num_(uart_num) {
+SerialDriver::SerialDriver(uart_port_t uart_num, int txd_pin, int rxd_pin, int baud_rate,
+   QueueHandle_t uart_queue_ ) : uart_num_(uart_num) {
     // 配置串口参数
     uart_config_t uart_config = {
         .baud_rate = baud_rate,
@@ -15,12 +16,19 @@ SerialDriver::SerialDriver(uart_port_t uart_num, int txd_pin, int rxd_pin, int b
         .rx_flow_ctrl_thresh = 0,
         .source_clk = UART_SCLK_APB,
     };
+
+ 
     // 应用参数配置
     uart_param_config(uart_num_, &uart_config);
       // 设置串口引脚
     uart_set_pin(uart_num_, txd_pin, rxd_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     // 安装串口驱动
-    uart_driver_install(uart_num_, BUF_SIZE, 0, 0, nullptr, 0);
+     ESP_ERROR_CHECK(uart_driver_install(uart_num_,
+                                        BUF_SIZE,    // RX buffer
+                                        BUF_SIZE,    // TX buffer，虽用不到也先留着
+                                        20,               // queue size
+                                        &uart_queue_,
+                                        0));
 }
 
 SerialDriver::~SerialDriver() {

@@ -11,7 +11,7 @@
 #include <thread>
 #include <serial_driver.h>
 #include <cJSON.h>
-
+#include <driver/uart.h>
 // 添加类型别名
 using ReturnValue = std::variant<bool, int, std::string>;
 
@@ -261,7 +261,7 @@ public:
     void AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
-    SerialDriver serial_driver_;
+    //SerialDriver serial_driver_;
 private:
     McpServer();
     ~McpServer();
@@ -276,6 +276,13 @@ private:
 
     std::vector<McpTool*> tools_;
     std::thread tool_call_thread_;
+
+  void SetupUartEvent();
+  static void UartEventTask(void* arg);
+
+  QueueHandle_t uart_queue_{ nullptr };
+  static constexpr uart_port_t VCU_PORT = UART_NUM_2;
+  static constexpr int UART_BUF_SIZE = 1024;
 };
 
 #endif // MCP_SERVER_H

@@ -8,7 +8,7 @@
 
 class SerialDriver {
 public:
-    SerialDriver(uart_port_t uart_num, int txd_pin, int rxd_pin, int baud_rate);
+    SerialDriver(uart_port_t uart_num, int txd_pin, int rxd_pin, int baud_rate,QueueHandle_t uart_queue_);
     ~SerialDriver();
     bool sendData(const std::string& data);
 
