@@ -22,7 +22,7 @@
 #define VCU_TX 40
 #define VCU_Baud 115200
 
-// 全局队列句柄（仅在本文件使用）
+// 全局队列句柄
 static QueueHandle_t s_uart_queue = nullptr;
 
 // 前向声明
@@ -30,7 +30,7 @@ static void UartEventTask(void* arg);
 
 // 在 McpServer 构造时调用
 void McpServer::SetupUartEvent() {
-    // 1) 删除旧驱动（确保干净）
+    // 1) 删除旧驱动
     uart_driver_delete(VCU_PORT);
 
     // 2) 安装 UART driver，并创建事件队列
@@ -183,46 +183,91 @@ void McpServer::AddCommonTools() {
     }
 
    AddTool("serial.send_data",
-        "通过串口发送固定格式数据帧（36字节）\n"
-        "格式: [0x5A][0xA5][CMD][...32字节数据...][XOR校验][0x55]\n"
+        "通过串口发送固定格式数据帧（6字节）\n"
+        "格式: [0x5A][0xA5][CMD][XOR校验][0x55]\n"
         "参数:\n"
-        "  `data`: 32 字节以内的数据",
+       "  `data`: 自然语言指令（如：打开车灯/开启照明 → 统一转换为\"开灯\"）",
         PropertyList({
             Property("data", kPropertyTypeString)
         }),
-        [](const PropertyList& props) -> ReturnValue {
-            std::string input = props["data"].value<std::string>();
-
-            // 构造帧
-            std::vector<uint8_t> frame;
-            frame.reserve(2 + 32 + 1 + 1);
-            frame.push_back(0x5A);
-            frame.push_back(0xA5);
-
-            // 插入 data（最多 32 字节）
-            auto data_bytes = std::vector<uint8_t>(
-                input.begin(),
-                input.begin() + std::min<size_t>(input.size(), 32)
-            );
-            frame.insert(frame.end(), data_bytes.begin(), data_bytes.end());
-
-            // 若不足 32 字节，用 0 填充
-            frame.resize(2 + 32, 0x00);
-
-            // 计算异或校验
-            uint8_t checksum = 0;
-            for (size_t i = 2; i < frame.size(); ++i) {
-                checksum ^= frame[i];
-            }
-            frame.push_back(checksum);
-            frame.push_back(0x55);
-
+        [](const PropertyList& properties) -> ReturnValue {
+            // 固定帧格式参数
+                const uint8_t FRAME_HEADER_1 = 0x5A;  //帧头
+                const uint8_t FRAME_HEADER_2 = 0xA5;  //帧头
+                const uint8_t FRAME_FOOTER = 0x55;  //帧尾
+                //const size_t FIXED_DATA_LENGTH = 6;    //有效数据长度
+                
+                std::string input = properties["data"].value<std::string>();
+                
+                // 语义统一
+                static const std::unordered_map<std::string, std::string> COMMAND_MAP = {
+                    {"开灯", "开灯"}, {"打开车灯", "开灯"}, {"开启照明", "开灯"},
+                    {"关灯", "关灯"}, {"关闭车灯", "关灯"}, {"熄灭灯光", "关灯"}
+                };
+    
+                // 语义匹配
+                std::string unified_cmd = input;
+                ESP_LOGI(TAG,"unified_cmd1=  %s",unified_cmd.c_str());
+                auto it = COMMAND_MAP.find(input);
+                if (it == COMMAND_MAP.end()) {
+                    // 模糊匹配
+                    if (input.find("开") != std::string::npos) {
+                        unified_cmd = "开灯";
+                        ESP_LOGI(TAG,"unified_cmdk=  %s",unified_cmd.c_str());
+                    } else if (input.find("关") != std::string::npos || input.find("关") != std::string::npos) {
+                        unified_cmd = "关灯";
+                        ESP_LOGI(TAG,"unified_cmdg=  %s",unified_cmd.c_str());
+                    }
+                } else {
+                    unified_cmd = it->second;
+                }
+                ESP_LOGI(TAG,"unified_cmdend=  %s",unified_cmd.c_str());
+                // 记录转换日志
+                ESP_LOGI(TAG, "指令转换: %s → %s", input.c_str(), unified_cmd.c_str());
+    
+                // 根据统一指令构建数据帧
+                std::vector<uint8_t> cmd_data;
+                if (unified_cmd == "开灯") {
+                    cmd_data = {0x00, 0x01}; // 两字节 CMD 表示开灯
+                } else if (unified_cmd == "关灯") {
+                    cmd_data = {0x00, 0x02}; // 两字节 CMD 表示关灯
+                } else
+                cmd_data = {0xFF, 0xFF};
+                // 构建数据帧
+                std::vector<uint8_t> frame;
+                // 帧头为 0xA5 0x5A
+                frame.push_back(FRAME_HEADER_1);
+                frame.push_back(FRAME_HEADER_2);
+                // 添加两字节 CMD
+                frame.insert(frame.end(), cmd_data.begin(), cmd_data.end());
+                
+                // 计算校验（异或校验）
+                uint8_t checksum = 0;
+                for (size_t i = 2; i < frame.size(); ++i) { // 从帧头后开始计算校验
+                    checksum ^= frame[i];
+                }
+                frame.push_back(checksum);
+                
+                // 帧尾
+                frame.push_back(FRAME_FOOTER);
+            
+                 std::string frame_str(frame.begin(), frame.end());
+                     // 转换为十六进制字符串
+     std::string hex_str;
+    for (uint8_t byte : frame_str) {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%02X ", byte);
+        hex_str += buf;
+    }
+    if (!hex_str.empty() && hex_str.back() == ' ') {
+        hex_str.pop_back(); // 移除最后一个空格
+    }
             // 发送
-            int sent = uart_write_bytes(
-                VCU_PORT,
-                reinterpret_cast<const char*>(frame.data()),
-                frame.size()
-            );
+            int sent = uart_write_bytes(VCU_NUM, frame.data(), frame.size());
+            if (sent > 0) ESP_LOGI(TAG, "数据发送成功 (%d 字节): %s", sent, hex_str.c_str());
+     
+           else  ESP_LOGE(TAG, "数据发送失败 (%d 字节): %s", static_cast<int>(frame_str.size()), hex_str.c_str());
+      
             return sent == (int)frame.size();
         });
 
