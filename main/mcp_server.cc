@@ -13,8 +13,25 @@
 #include "application.h"
 #include "display.h"
 #include "board.h"
+#include <freertos/ringbuf.h>  // 引入 RingbufHandle_t 定义
+#include <esp_heap_caps.h>      // 引入 heap_caps_malloc/free
+#include <freertos/FreeRTOS.h>    // FreeRTOS 基础定义
+#include <freertos/task.h>        // xTaskCreate、pdMS_TO_TICKS 等
+#include <soc/periph_defs.h>
+
+#include <esp_intr_alloc.h>  // 中断分配相关宏
+#include <soc/uart_struct.h>    // UART2 寄存器结构定义
+#include <soc/uart_reg.h>       // UART 中断状态掩码宏
 
 #define TAG "MCP"
+#define VCU_NUM UART_NUM_2     // UART 设备号
+#define VCU_RX_PIN 41          // RX 引脚
+#define VCU_TX_PIN 40          // TX 引脚
+#define VCU_BAUD 115200        // 波特率
+#define DMA_BUF_SIZE 1024      // DMA 缓冲区大小
+#define DEFAULT_TOOLCALL_STACK_SIZE 6144  // 工具调用默认栈大小
+#define TAG "MCP"
+
 
 #define DEFAULT_TOOLCALL_STACK_SIZE 6144
 #define VCU_NUM UART_NUM_2
@@ -22,10 +39,14 @@
 #define VCU_TX 40
 #define VCU_Baud 115200
 
+#define VCU_ID 0x16               //VCU  ID
+#define MCP_ID 0x11              //MCP  ID
+#define CMD_CMAP_WR 0x02        //写指令（需应答）
+#define DATA_INDEX 0X08         //数据索引
 // 全局队列句柄
 static QueueHandle_t s_uart_queue = nullptr;
 
-// 前向声明
+//声明
 static void UartEventTask(void* arg);
 
 // 在 McpServer 构造时调用
@@ -86,6 +107,7 @@ static void UartEventTask(void* arg) {
                 );
                 if (len > 0) {
                     uart_write_bytes(UART_NUM_2, (const char*)buf, len);
+                    //ESP_LOGI("TAG", "UART_DATA: %s", (const char*)buf);
                 }
             }
         }
@@ -93,14 +115,264 @@ static void UartEventTask(void* arg) {
     }
 }
 
+// static RingbufHandle_t s_ringbuf = nullptr;
+// static TaskHandle_t s_parse_task = nullptr;
+// static volatile size_t last_index = 0;  // 上次已处理的 DMA 缓冲区索引
+
+// static void IRAM_ATTR uart_isr(void* arg);
+// static void DataParseTask(void* arg);
+
+// void McpServer::SetupUartEvent() {
+//     // 1. 删除旧驱动
+//     uart_driver_delete(VCU_NUM);
+
+//     // 2. 安装 DMA 驱动
+//     ESP_ERROR_CHECK(uart_driver_install(
+//         VCU_NUM,
+//         DMA_BUF_SIZE * 2,  // RX 双缓冲区
+//         0,
+//         0,
+//         nullptr,
+//         0
+//     ));
+
+//     // 3. 配置 UART 参数
+//     uart_config_t cfg = {
+//         .baud_rate = VCU_BAUD,
+//         .data_bits = UART_DATA_8_BITS,
+//         .parity    = UART_PARITY_DISABLE,
+//         .stop_bits = UART_STOP_BITS_1,
+//         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+//         .source_clk = UART_SCLK_APB,
+//     };
+//     ESP_ERROR_CHECK(uart_param_config(VCU_NUM, &cfg));
+//     ESP_ERROR_CHECK(uart_set_pin(VCU_NUM, VCU_TX_PIN, VCU_RX_PIN,
+//                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+
+//     // 4. 设置半满阈值与空闲超时，并启用 RX 相关中断
+//     ESP_ERROR_CHECK(uart_set_rx_full_threshold(VCU_NUM, DMA_BUF_SIZE / 2));  // 半满阈值
+//     ESP_ERROR_CHECK(uart_set_rx_timeout(VCU_NUM, 10));                    // 空闲超时（单位：RTOS tick）
+//     ESP_ERROR_CHECK(uart_enable_rx_intr(VCU_NUM));                        // 启用接收中断
+
+//     // 5. 创建环形缓冲区
+//     s_ringbuf = xRingbufferCreate(DMA_BUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+//     configASSERT(s_ringbuf);
+
+//     // 6. 注册 UART ISR
+//         // 6. 通过 esp_intr_alloc 注册 UART2 中断
+//     // ETS_UART2_INTR_SOURCE 定义于 soc/periph_defs.h
+//     esp_intr_alloc(ETS_UART2_INTR_SOURCE,
+//                   ESP_INTR_FLAG_LEVEL1 | ESP_INTR_FLAG_IRAM,
+//                   uart_isr,
+//                   nullptr,
+//                   nullptr);
+
+//     // 7. 创建后台解析任务（当前仅回显）
+//     BaseType_t res = xTaskCreate(
+//         DataParseTask,
+//         "mcp_parse",
+//         4096,
+//         nullptr,
+//         tskIDLE_PRIORITY + 2,
+//         &s_parse_task
+//     );
+//     configASSERT(res == pdPASS);
+// }
+
+// static void IRAM_ATTR uart_isr(void* arg) {
+//     // 读取并清除所有中断状态
+//     uint32_t intr_st = UART2.int_st.val;
+//     UART2.int_clr.val = intr_st;
+
+//     // 获取 DMA 缓冲区剩余数据量
+//     size_t remain;
+//     uart_get_buffered_data_len(VCU_NUM, &remain);
+
+//     // 1) 溢出中断（满）: 处理从 last_index 到缓冲区末尾数据
+//     if (intr_st & UART_RXFIFO_OVF_INT_ST_M) {
+//         size_t handle = DMA_BUF_SIZE - last_index;
+//         if (handle) {
+//             uint8_t* buf = (uint8_t*)heap_caps_malloc(handle, MALLOC_CAP_DMA);
+//             if (buf) {
+//                 int rd = uart_read_bytes(VCU_NUM, buf, handle, 0);
+//                 xRingbufferSendFromISR(s_ringbuf, buf, rd, nullptr);
+//                 heap_caps_free(buf);
+//             }
+//         }
+//         last_index = 0;
+//     }
+
+//     // 2) 半满中断: 当前写指针 = DMA_BUF_SIZE - remain
+//     if (intr_st & UART_RXFIFO_FULL_INT_ST_M) {
+//         size_t cur = DMA_BUF_SIZE - remain;
+//         size_t handle = (cur + DMA_BUF_SIZE - last_index) % DMA_BUF_SIZE;
+//         if (handle) {
+//             uint8_t* buf = (uint8_t*)heap_caps_malloc(handle, MALLOC_CAP_DMA);
+//             if (buf) {
+//                 int rd = uart_read_bytes(VCU_NUM, buf, handle, 0);
+//                 xRingbufferSendFromISR(s_ringbuf, buf, rd, nullptr);
+//                 heap_caps_free(buf);
+//             }
+//         }
+//         last_index = cur;
+//     }
+
+//     // 3) 空闲超时中断: 同半满处理
+//     if (intr_st & UART_RXFIFO_TOUT_INT_ST_M) {
+//         size_t cur = DMA_BUF_SIZE - remain;
+//         size_t handle = (cur + DMA_BUF_SIZE - last_index) % DMA_BUF_SIZE;
+//         if (handle) {
+//             uint8_t* buf = (uint8_t*)heap_caps_malloc(handle, MALLOC_CAP_DMA);
+//             if (buf) {
+//                 int rd = uart_read_bytes(VCU_NUM, buf, handle, 0);
+//                 xRingbufferSendFromISR(s_ringbuf, buf, rd, nullptr);
+//                 heap_caps_free(buf);
+//             }
+//         }
+//         last_index = cur;
+//     }
+// }
+
+// static void DataParseTask(void* arg) {
+//     size_t len;
+//     uint8_t* data;
+//     for (;;) {
+//         data = (uint8_t*)xRingbufferReceive(s_ringbuf, &len, pdMS_TO_TICKS(500));
+//         if (data) {
+//             // 当前仅回显
+//             uart_write_bytes(VCU_NUM, (const char*)data, len);
+//             vRingbufferReturnItem(s_ringbuf, data);
+//         }
+//     }
+// }
+
+
+// static RingbufHandle_t s_ringbuf = nullptr;
+// static TaskHandle_t s_parse_task = nullptr;
+// static volatile size_t last_index = 0;
+
+// static void IRAM_ATTR uart_isr(void* arg);
+// static void DataParseTask(void* arg);
+
+// void McpServer::SetupUartEvent() {
+//     // 删除旧驱动
+//     uart_driver_delete(VCU_NUM);
+//     // 安装 DMA 驱动
+//     ESP_ERROR_CHECK(uart_driver_install(VCU_NUM, DMA_BUF_SIZE * 2, 0, 0, nullptr, 0));
+//     // 配置 UART
+//     uart_config_t cfg = {
+//         .baud_rate = VCU_BAUD,
+//         .data_bits = UART_DATA_8_BITS,
+//         .parity    = UART_PARITY_DISABLE,
+//         .stop_bits = UART_STOP_BITS_1,
+//         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+//         .source_clk = UART_SCLK_APB,
+//     };
+//     ESP_ERROR_CHECK(uart_param_config(VCU_NUM, &cfg));
+//     ESP_ERROR_CHECK(uart_set_pin(VCU_NUM, VCU_TX_PIN, VCU_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+//     // 使能中断：半满、溢出、空闲
+//     ESP_ERROR_CHECK(uart_set_rx_full_threshold(VCU_NUM, DMA_BUF_SIZE / 2));
+//     ESP_ERROR_CHECK(uart_set_rx_timeout(VCU_NUM, 10));
+//     ESP_ERROR_CHECK(uart_enable_intr_mask(VCU_NUM,
+//         UART_RXFIFO_FULL_INT_ENA_M |
+//         UART_RXFIFO_OVF_INT_ENA_M  |
+//         UART_RXFIFO_TOUT_INT_ENA_M
+//     ));
+//     // 创建环形缓冲
+//     s_ringbuf = xRingbufferCreate(DMA_BUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+//     configASSERT(s_ringbuf);
+//     // 注册 ISR
+//     esp_intr_alloc(ETS_UART2_INTR_SOURCE,
+//                   ESP_INTR_FLAG_LEVEL1 | ESP_INTR_FLAG_IRAM,
+//                   uart_isr,
+//                   nullptr,
+//                   nullptr);
+
+//     // 使能中断
+// ESP_ERROR_CHECK(uart_enable_rx_intr(VCU_NUM));
+
+//     // 创建解析任务
+//     BaseType_t res = xTaskCreate(DataParseTask, "mcp_parse", 4096, nullptr, tskIDLE_PRIORITY + 2, &s_parse_task);
+//     configASSERT(res == pdPASS);
+// }
+
+// static void IRAM_ATTR uart_isr(void* arg) {
+//     // 读取并清除中断
+//    uart_dev_t* dev = nullptr;
+//     if (VCU_NUM == UART_NUM_0) dev = &UART0;
+//     else if (VCU_NUM == UART_NUM_1) dev = &UART1;
+//     else if (VCU_NUM == UART_NUM_2) dev = &UART2;
+//     if (!dev) return;
+
+//     uint32_t intr_st = dev->int_st.val;
+//     dev->int_clr.val = intr_st;
+   
+//     // 获取剩余数据
+//     size_t remain;
+//     uart_get_buffered_data_len(VCU_NUM, &remain);
+//     BaseType_t higher = pdFALSE;
+//     // 溢出中断
+//     if (intr_st & UART_RXFIFO_OVF_INT_ST_M) {
+//         size_t handle = DMA_BUF_SIZE - last_index;
+//         if (handle) {
+//             uint8_t* buf = (uint8_t*)heap_caps_malloc(handle, MALLOC_CAP_DMA);
+//             if (buf) {
+//                 int rd = uart_read_bytes(VCU_NUM, buf, handle, 0);
+//                 xRingbufferSendFromISR(s_ringbuf, buf, rd, &higher);
+//                 heap_caps_free(buf);
+//             }
+//         }
+//         last_index = 0;
+//     }
+//     // 半满中断
+//     if (intr_st & UART_RXFIFO_FULL_INT_ST_M) {
+//         size_t cur = DMA_BUF_SIZE - remain;
+//         size_t handle = (cur + DMA_BUF_SIZE - last_index) % DMA_BUF_SIZE;
+//         if (handle) {
+//             uint8_t* buf = (uint8_t*)heap_caps_malloc(handle, MALLOC_CAP_DMA);
+//             if (buf) {
+//                 int rd = uart_read_bytes(VCU_NUM, buf, handle, 0);
+//                 xRingbufferSendFromISR(s_ringbuf, buf, rd, &higher);
+//                 heap_caps_free(buf);
+//             }
+//         }
+//         last_index = cur;
+//     }
+//     // 空闲中断
+//     if (intr_st & UART_RXFIFO_TOUT_INT_ST_M) {
+//         size_t cur = DMA_BUF_SIZE - remain;
+//         size_t handle = (cur + DMA_BUF_SIZE - last_index) % DMA_BUF_SIZE;
+//         if (handle) {
+//             uint8_t* buf = (uint8_t*)heap_caps_malloc(handle, MALLOC_CAP_DMA);
+//             if (buf) {
+//                 int rd = uart_read_bytes(VCU_NUM, buf, handle, 0);
+//                 xRingbufferSendFromISR(s_ringbuf, buf, rd, &higher);
+//                 heap_caps_free(buf);
+//             }
+//         }
+//         last_index = cur;
+//     }
+//     if (higher) portYIELD_FROM_ISR();
+// }
+
+// static void DataParseTask(void* arg) {
+//     for (;;) {
+//         size_t len;
+//         uint8_t* data = (uint8_t*)xRingbufferReceive(s_ringbuf, &len, pdMS_TO_TICKS(500));
+//         if (data) {
+//             uart_write_bytes(VCU_NUM, (const char*)data, len);
+//             vRingbufferReturnItem(s_ringbuf, data);
+//         }
+//     }
+// }
+
 // 构造函数里启动 UART
 McpServer::McpServer() {
     SetupUartEvent();
 }
 
 McpServer::~McpServer() {
-    // 如果你不需要特别的清理，可以留个空实现
-    // 或者把 tools_ 里的内容 delete 掉：
+    
     for (auto tool : tools_) {
         delete tool;
     }
@@ -183,7 +455,7 @@ void McpServer::AddCommonTools() {
     }
 
    AddTool("serial.send_data",
-        "通过串口发送固定格式数据帧（6字节）\n"
+        "通过串口发送固定格式数据帧 \n"
         "格式: [0x5A][0xA5][CMD][XOR校验][0x55]\n"
         "参数:\n"
        "  `data`: 自然语言指令（如：打开车灯/开启照明 → 统一转换为\"开灯\"）",
@@ -194,7 +466,13 @@ void McpServer::AddCommonTools() {
             // 固定帧格式参数
                 const uint8_t FRAME_HEADER_1 = 0x5A;  //帧头
                 const uint8_t FRAME_HEADER_2 = 0xA5;  //帧头
-                const uint8_t FRAME_FOOTER = 0x55;  //帧尾
+                const uint8_t FRAME_LEN=0X02;//指令长度
+                const uint8_t FRAME_SRC_ID=MCP_ID;//源ID号
+                const uint8_t FRAME_DES_ID=VCU_ID;//目标ID号
+                const uint8_t FRAME_CMD=CMD_CMAP_WR;//命令字
+                const uint8_t FRAME_INDEX=DATA_INDEX;//数据索引
+
+                //const uint8_t FRAME_FOOTER = 0x55;  //帧尾
                 //const size_t FIXED_DATA_LENGTH = 6;    //有效数据长度
                 
                 std::string input = properties["data"].value<std::string>();
@@ -230,7 +508,7 @@ void McpServer::AddCommonTools() {
                 if (unified_cmd == "开灯") {
                     cmd_data = {0x00, 0x01}; // 两字节 CMD 表示开灯
                 } else if (unified_cmd == "关灯") {
-                    cmd_data = {0x00, 0x02}; // 两字节 CMD 表示关灯
+                    cmd_data = {0x02, 0x03}; // 两字节 CMD 表示关灯
                 } else
                 cmd_data = {0xFF, 0xFF};
                 // 构建数据帧
@@ -238,18 +516,28 @@ void McpServer::AddCommonTools() {
                 // 帧头为 0xA5 0x5A
                 frame.push_back(FRAME_HEADER_1);
                 frame.push_back(FRAME_HEADER_2);
-                // 添加两字节 CMD
+                frame.push_back(FRAME_LEN);
+                frame.push_back(FRAME_SRC_ID);
+                frame.push_back(FRAME_DES_ID);
+                frame.push_back(FRAME_CMD);
+                frame.push_back(FRAME_INDEX);
+                // 添加两字节 数据段（cmd_data)
                 frame.insert(frame.end(), cmd_data.begin(), cmd_data.end());
                 
-                // 计算校验（异或校验）
-                uint8_t checksum = 0;
-                for (size_t i = 2; i < frame.size(); ++i) { // 从帧头后开始计算校验
-                    checksum ^= frame[i];
+                // 计算校验
+                uint32_t checksum = 0;
+                // for (size_t i = 2; i < frame.size(); ++i) { // 从帧头后开始计算校验
+                //     checksum ^= frame[i];
+                // }
+                for(int i=2;i<frame.size(); i++){
+                    checksum+=frame[i];
                 }
-                frame.push_back(checksum);
-                
+                checksum=(uint16_t)~checksum;
+                frame.push_back((uint8_t)checksum);
+                frame.push_back(checksum>>8);
+             
                 // 帧尾
-                frame.push_back(FRAME_FOOTER);
+                //frame.push_back(FRAME_FOOTER);
             
                  std::string frame_str(frame.begin(), frame.end());
                      // 转换为十六进制字符串
@@ -448,8 +736,8 @@ void McpServer::GetToolsList(int id, const std::string& cursor) {
             break;
         }
         
-        json += tool_json;
-        ++it;
+        json += tool_json;//追加工具描述
+        ++it;//下一个工具
     }
     
     if (json.back() == ',') {

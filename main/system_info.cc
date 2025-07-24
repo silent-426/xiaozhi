@@ -133,8 +133,14 @@ exit:    //Common return path
 }
 
 void SystemInfo::PrintTaskList() {
+    // 任务列表缓冲区（500字节约支持15个任务信息，复杂系统需增大）
     char buffer[500];
+    
+    // 调用FreeRTOS原生API获取任务状态信息
+    // 格式："任务名 状态 优先级 堆栈剩余 任务编号"
     vTaskList(buffer);
+
+    // 通过ESP日志系统输出完整任务列表
     ESP_LOGI(TAG, "Task list: \n%s", buffer);
 }
 

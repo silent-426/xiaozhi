@@ -79,7 +79,7 @@ Application::Application() {
     esp_timer_create_args_t clock_timer_args = {
         .callback = [](void* arg) {
             Application* app = (Application*)arg;
-            app->OnClockTimer();
+            app->OnClockTimer();//每秒触发1次
         },
         .arg = this,
         .dispatch_method = ESP_TIMER_TASK,
@@ -728,8 +728,8 @@ void Application::OnClockTimer() {
 
     // Print the debug info every 10 seconds
     if (clock_ticks_ % 10 == 0) {
-        // SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
-        // SystemInfo::PrintTaskList();
+         //SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
+         //SystemInfo::PrintTaskList();
         SystemInfo::PrintHeapStats();
 
         // If we have synchronized server time, set the status to clock "HH:MM" if the device is idle
