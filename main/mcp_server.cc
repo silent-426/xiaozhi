@@ -42,7 +42,9 @@
 #define VCU_ID 0x16               //VCU  ID
 #define MCP_ID 0x11              //MCP  ID
 #define CMD_CMAP_WR 0x02        //写指令（需应答）
-#define DATA_INDEX 0X08         //数据索引
+#define LED_INDEX 0X08         //数据索引
+#define Persent_INDEX 0X20         //数据索引
+#define TCU_INDEX 0X30         //数据索引
 // 全局队列句柄
 static QueueHandle_t s_uart_queue = nullptr;
 
@@ -470,7 +472,7 @@ void McpServer::AddCommonTools() {
                 const uint8_t FRAME_SRC_ID=MCP_ID;//源ID号
                 const uint8_t FRAME_DES_ID=VCU_ID;//目标ID号
                 const uint8_t FRAME_CMD=CMD_CMAP_WR;//命令字
-                const uint8_t FRAME_INDEX=DATA_INDEX;//数据索引
+                const uint8_t FRAME_INDEX=LED_INDEX;//数据索引
 
                 //const uint8_t FRAME_FOOTER = 0x55;  //帧尾
                 //const size_t FIXED_DATA_LENGTH = 6;    //有效数据长度
@@ -559,6 +561,134 @@ void McpServer::AddCommonTools() {
             return sent == (int)frame.size();
         });
 
+    // tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());
+    // 在 serial.send_data 工具后添加新工具
+    AddTool("serial.set_switch_level",
+        "切换TCU档位（0-6）\n"
+        "格式: [0x5A][0xA5][CMD][XOR校验][0x55]\n"
+        "参数:\n"
+        "  `level`: 自然语言指令（如：加档减档 → 加档提取1，减档提取0）",
+        PropertyList({
+            Property("level", kPropertyTypeInteger, 0, 1)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            // 使用与 serial.send_data 相同的帧格式
+            const uint8_t FRAME_HEADER_1 = 0x5A;
+            const uint8_t FRAME_HEADER_2 = 0xA5;
+            const uint8_t FRAME_LEN = 0x02;
+            const uint8_t FRAME_SRC_ID = MCP_ID;
+            const uint8_t FRAME_DES_ID = VCU_ID;
+            const uint8_t FRAME_CMD = CMD_CMAP_WR;
+            const uint8_t FRAME_INDEX = TCU_INDEX;
+
+            int tcu = properties["level"].value<int>();
+            
+            // 构建数据帧
+            std::vector<uint8_t> frame = {
+                FRAME_HEADER_1,
+                FRAME_HEADER_2,
+                FRAME_LEN,
+                FRAME_SRC_ID,
+                FRAME_DES_ID,
+                FRAME_CMD,
+                FRAME_INDEX,
+                static_cast<uint8_t>(tcu), // 助力比级别
+                0x00  // 预留位
+            };
+
+            // 计算校验（与原有校验方式一致）
+            uint16_t checksum = 0;
+            for (size_t i = 2; i < frame.size(); ++i) {
+                checksum += frame[i];
+            }
+            checksum = ~checksum;
+            frame.push_back(checksum & 0xFF);
+            frame.push_back((checksum >> 8) & 0xFF);
+
+                   std::string frame_str(frame.begin(), frame.end());
+                     // 转换为十六进制字符串
+     std::string hex_str;
+    for (uint8_t byte : frame_str) {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%02X ", byte);
+        hex_str += buf;
+    }
+    if (!hex_str.empty() && hex_str.back() == ' ') {
+        hex_str.pop_back(); // 移除最后一个空格
+    }
+            // 发送数据
+            int sent = uart_write_bytes(VCU_NUM, frame.data(), frame.size());
+            if (sent > 0) {
+                 ESP_LOGI(TAG, "数据发送成功 (%d 字节): %s", sent, hex_str.c_str());
+                //ESP_LOGI(TAG, "助力比级别 %d 发送成功", level);
+                return true;
+            }
+            ESP_LOGE(TAG, "档位调节发送失败");
+            return false;
+        });
+        AddTool("serial.set_assist_level",
+        "设置骑行助力比级别（0-6）\n"
+        "格式: [0x5A][0xA5][CMD][XOR校验][0x55]\n"
+        "参数:\n"
+        "  `level`: 自然语言指令（如：设置助力比为3级 → 提取数字0-6）",
+        PropertyList({
+            Property("level", kPropertyTypeInteger, 0, 6)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            // 使用与 serial.send_data 相同的帧格式
+            const uint8_t FRAME_HEADER_1 = 0x5A;
+            const uint8_t FRAME_HEADER_2 = 0xA5;
+            const uint8_t FRAME_LEN = 0x02;
+            const uint8_t FRAME_SRC_ID = MCP_ID;
+            const uint8_t FRAME_DES_ID = VCU_ID;
+            const uint8_t FRAME_CMD = CMD_CMAP_WR;
+            const uint8_t FRAME_INDEX = Persent_INDEX;
+
+            int level = properties["level"].value<int>();
+            
+            // 构建数据帧
+            std::vector<uint8_t> frame = {
+                FRAME_HEADER_1,
+                FRAME_HEADER_2,
+                FRAME_LEN,
+                FRAME_SRC_ID,
+                FRAME_DES_ID,
+                FRAME_CMD,
+                FRAME_INDEX,
+                static_cast<uint8_t>(level), // 助力比级别
+                0x00  // 预留位
+            };
+
+            // 计算校验（与原有校验方式一致）
+            uint16_t checksum = 0;
+            for (size_t i = 2; i < frame.size(); ++i) {
+                checksum += frame[i];
+            }
+            checksum = ~checksum;
+            frame.push_back(checksum & 0xFF);
+            frame.push_back((checksum >> 8) & 0xFF);
+
+                   std::string frame_str(frame.begin(), frame.end());
+                     // 转换为十六进制字符串
+     std::string hex_str;
+    for (uint8_t byte : frame_str) {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%02X ", byte);
+        hex_str += buf;
+    }
+    if (!hex_str.empty() && hex_str.back() == ' ') {
+        hex_str.pop_back(); // 移除最后一个空格
+    }
+            // 发送数据
+            int sent = uart_write_bytes(VCU_NUM, frame.data(), frame.size());
+            if (sent > 0) {
+                 ESP_LOGI(TAG, "数据发送成功 (%d 字节): %s", sent, hex_str.c_str());
+                //ESP_LOGI(TAG, "助力比级别 %d 发送成功", level);
+                return true;
+            }
+            ESP_LOGE(TAG, "助力比发送失败");
+            return false;
+        });
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());
 }
 

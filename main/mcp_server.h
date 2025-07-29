@@ -250,7 +250,7 @@ public:
 };
 
 class McpServer {
-public:
+private:
     static McpServer& GetInstance() {
         static McpServer instance;
         return instance;
@@ -262,10 +262,7 @@ public:
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
     //SerialDriver serial_driver_;
-private:
-    McpServer();
-    ~McpServer();
-
+public:
     void ParseCapabilities(const cJSON* capabilities);
 
     void ReplyResult(int id, const std::string& result);
@@ -283,6 +280,15 @@ private:
   QueueHandle_t uart_queue_{ nullptr };
   static constexpr uart_port_t VCU_PORT = UART_NUM_2;
   static constexpr int UART_BUF_SIZE = 1024;
+  TaskHandle_t twai_task_handle;  // CAN 任务句柄
+  
+  // TWAI 回调声明
+  static bool TwaiRxCallback(twai_handle_t handle, 
+                           const twai_rx_event_data_t* edata,
+                           void* user_ctx);
+  
+  // TWAI 初始化方法声明
+  void SetupTwaiEvent();
 };
 
 #endif // MCP_SERVER_H
